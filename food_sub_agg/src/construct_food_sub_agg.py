@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Tuple
 import yaml
 
+#NOTE: The stripping of non-numeric characters when mergin the market data to the food consumption data seems to 
+#      flatten things like red and white onions to one itemcode, or different types of rice to one item code. 
+#      I'm not sure if that's a significant issue or not.
+
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     filename='logs/construct_consumption_agg.log',
@@ -33,12 +37,14 @@ def clean_mrk_mod_d(mrk_mod_d: pd.DataFrame, col_names: dict) -> pd.DataFrame:
     """
     mrk_mod_d = mrk_mod_d.rename(columns=col_names)
     mrk_mod_d = mrk_mod_d[mrk_mod_d["item_available"] == 1]
+    mrk_mod_d["item_name"] = mrk_mod_d["item_name"].str.strip()
     mrk_mod_d["median_weight (kg)"] = mrk_mod_d[["item_weight_1", "item_weight_2", "item_weight_3"]].median(axis=1, skipna=True)
     mrk_mod_d["median_price"] = mrk_mod_d[["item_price_1", "item_price_2", "item_price_3"]].median(axis=1, skipna=True)
     mrk_mod_d = mrk_mod_d[["item_code", "item_name", "unit_code", "unit_name", "median_weight (kg)", "median_price"]].groupby(["item_name", "item_code", "unit_name", "unit_code"]).median().reset_index()
     mrk_mod_d = mrk_mod_d.rename(columns={"median_weight (kg)": "unit_weight (kg)", "median_price": "unit_price"})
     mrk_mod_d['item_code'] = mrk_mod_d['item_code'].apply(strip_non_numeric)
     mrk_mod_d['item_code'] = mrk_mod_d['item_code'].astype(int)
+    mrk_mod_d['unit_price'] = mrk_mod_d['unit_price'].astype(float)
     return mrk_mod_d
 
 def clean_hh_mod_g1(hh_mod_g1: pd.DataFrame, col_names: dict) -> pd.DataFrame:
@@ -63,6 +69,7 @@ def clean_hh_mod_g1(hh_mod_g1: pd.DataFrame, col_names: dict) -> pd.DataFrame:
     hh_mod_g1["All purchased"] = hh_mod_g1["Quantity purchased"] == hh_mod_g1["Quantity consumed in last week"]
     hh_mod_g1 = hh_mod_g1[hh_mod_g1["item_code"].notna()]
     hh_mod_g1 = hh_mod_g1[hh_mod_g1["item_code"] != "nan"]
+    hh_mod_g1["Amount paid"] = hh_mod_g1["Amount paid"].astype(float)
     return hh_mod_g1
 
 
@@ -104,7 +111,6 @@ def calc_price(df: pd.DataFrame, row: pd.Series) -> float:
                 logger.info(f"Using median price from whole country instead, got {price}")
             except ValueError:
                 logger.error("No prices available, returning nan")
-                price = np.nan
             return price
         num_obs_available = len(df[df[geographical_specificity_dict[geographical_specificity_index]] == row[geographical_specificity_dict[geographical_specificity_index]]])
         logger.debug(f"Number of observations available: {num_obs_available}")
@@ -137,12 +143,15 @@ def calculate_all_food_prices(df: pd.DataFrame) -> pd.DataFrame:
     """
     items_where_not_all_purchased = df[df["All purchased"] == False]
     full_amount_paid = items_where_not_all_purchased["Amount paid"].values
+    full_amount_paid = full_amount_paid.astype(float)
     for i in range(len(items_where_not_all_purchased.index)):
         row = items_where_not_all_purchased.iloc[i]
         quantity_not_purchased_but_consumed = row["Quantity consumed in last week"] - row["Quantity purchased"]
-        full_amount_paid[i] += quantity_not_purchased_but_consumed*calc_price(df[(df["item_code"] == row["item_code"])], row)
+        calcd_price = calc_price(df[(df["item_code"] == row["item_code"])], row)
+        full_amount_paid[i] += float(quantity_not_purchased_but_consumed*calcd_price)
     items_where_not_all_purchased["Amount paid"] = full_amount_paid
     df = pd.concat([df[df["All purchased"] == True], items_where_not_all_purchased])
+    df = df.sort_index()
     return df
 
 def standardize_units(hh_mod_g1: pd.DataFrame, mrk_mod_d: pd.DataFrame) -> pd.DataFrame:
