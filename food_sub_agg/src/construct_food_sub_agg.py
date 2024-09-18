@@ -147,7 +147,7 @@ def calculate_all_food_prices(df: pd.DataFrame) -> pd.DataFrame:
     for i in range(len(items_where_not_all_purchased.index)):
         row = items_where_not_all_purchased.iloc[i]
         quantity_not_purchased_but_consumed = row["Quantity consumed in last week"] - row["Quantity purchased"]
-        calcd_price = calc_price(df[(df["item_code"] == row["item_code"])], row)
+        calcd_price = calc_price(df[(df["item_code"] == row["item_code"]) & (df["unit_code"] == row["unit_code"])], row)
         full_amount_paid[i] += float(quantity_not_purchased_but_consumed*calcd_price)
     items_where_not_all_purchased["Amount paid"] = full_amount_paid
     df = pd.concat([df[df["All purchased"] == True], items_where_not_all_purchased])
