@@ -1,0 +1,100 @@
+data_dir: "MWI_2019_IHS-V_v06_M_Stata"
+
+df_configs:
+  HH_MOD_I1:
+    recall_period: 7
+    columns:
+      hh_i01: item_purchased
+      hh_i02: item_code
+      hh_i03: amount_paid
+  HH_MOD_I2: 
+    recall_period: 30.437
+    columns: 
+      hh_i04: item_purchased
+      hh_i05: item_code
+      hh_i06: amount_paid
+  HH_MOD_J:
+    recall_period: 91.311
+    columns:
+      hh_j01: item_purchased
+      hh_j02: item_code
+      hh_j03: amount_paid
+  HH_MOD_K1:
+    recall_period: 365
+    columns:
+      hh_k01: item_purchased
+      hh_k02: item_code
+      hh_k03: amount_paid
+  HH_MOD_K2:
+    recall_period: 365
+    columns:
+      hh_k01: item_purchased
+      hh_k02: item_code
+      hh_k03: item_value
+      hh_k04: amount_paid
+
+consumption_areas:
+  Transport:
+    code: rexp_cat073
+    cols:
+      - Public transport - Bicycle Taxi 
+      - Public transport - Bus/Minibus 
+      - Public transport - Other (Truck, Oxcart, Etc) 
+  Personal Care:
+    code: rexp_cat121
+    cols:
+      - Bar soap (body soap or clothes soap) 
+      - Clothes soap (powder, paste) 
+      - Toothpaste, toothbrush 
+      - Toilet paper 
+      - Glycerine, Vaseline, skin creams 
+      - Other personal products (shampoo, razor blades, cosmetics, hair products, etc)
+  Postal Services:
+    code: rexp_cat081
+    cols:
+      - Postage stamps or other postal fees 
+  Vehicle Operation:
+    code: rexp_cat072
+    cols:
+      - Petrol or diesel 
+      - Motor vehicle service, repair, or parts 
+      - Bicycle service, repair, or parts
+  Clothing:
+    code: rexp_cat031
+    cols:
+      - Infant clothing 
+      - Baby nappies/diapers 
+      - Boy's trousers 
+      - Boy's shirts 
+      - Boy's jackets 
+      - Boy's undergarments 
+      - Boy's other clothing 
+      - Men's trousers 
+      - Men's shirts 
+      - Men's jackets 
+      - Men's undergarments 
+      - Men's other clothing 
+      - Girl's blouse/shirt 
+      - Girl's dress/skirt 
+      - Girl's undergarments 
+      - Girl's other clothing 
+      - Lady's blouse/shirt 
+      - Chitenje cloth 
+      - Lady's dress/skirt 
+      - Lady's undergarments 
+      - Lady's other clothing 
+      - Boy's shoes 
+      - Men's shoes 
+      - Girl's shoes 
+      - Lady's shoes 
+      - Cloth, thread, other sewing material 
+      - Laundry, dry cleaning, tailoring fees 
+  Dishes:
+    code: rexp_cat054
+    cols:
+      - Bowls, glassware, plates, silverware, etc 
+      - Cooking utensils (cookpots, stirring spoons and whisks, etc)
+
+recall_periods:
+  HH_MOD_I1: 7
+  HH_MOD_I2: 30.437

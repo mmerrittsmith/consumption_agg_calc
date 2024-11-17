@@ -10,11 +10,12 @@ import yaml
 
 #NOTE: The stripping of non-numeric characters when mergin the market data to the food consumption data seems to 
 #      flatten things like red and white onions to one itemcode, or different types of rice to one item code. 
-#      I'm not sure if that's a significant issue or not.
+#      I'm not sure if that's a significant issue or not. I think this will be an issue when looking at food 
+#      variety increses/ substitution within food groups. 
 
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s - %(message)s',
-                    filename='logs/construct_consumption_agg.log',
+                    filename='logs/food_sub_agg.log',
                     filemode='w')
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,27 @@ def clean_mrk_mod_d(mrk_mod_d: pd.DataFrame, col_names: dict) -> pd.DataFrame:
     mrk_mod_d['item_code'] = mrk_mod_d['item_code'].astype(int)
     mrk_mod_d['unit_price'] = mrk_mod_d['unit_price'].astype(float)
     return mrk_mod_d
+
+def winsorize_by_item(df: pd.DataFrame, col: str = 'price_per_kg', limits=(0.05, 0.05)) -> pd.DataFrame:
+    """
+    Winsorize a column by group, preserving the distribution within each item_code.
+    
+    Args:
+        df (pd.DataFrame): DataFrame containing the data
+        col (str): Name of column to winsorize
+        limits (tuple): Lower and upper percentile limits for winsorization
+        
+    Returns:
+        pd.DataFrame: DataFrame with winsorized values
+    """
+    for item in df['item_code'].unique():
+        mask = df['item_code'] == item
+        values = df.loc[mask, col]
+        if len(values) > 0:  # Only process if we have values
+            lower = np.percentile(values, limits[0] * 100)
+            upper = np.percentile(values, (1 - limits[1]) * 100)
+            df.loc[mask, col] = np.clip(values, lower, upper)
+    return df
 
 def clean_hh_mod_g1(hh_mod_g1: pd.DataFrame, col_names: dict) -> pd.DataFrame:
     """
@@ -100,25 +122,22 @@ def calc_price(df: pd.DataFrame, row: pd.Series) -> float:
     geographical_specificity_index = 0
     geographical_specificity_dict = {1: "region", 2: "district", 3: "reside", 4: "country"}
     price = np.nan
-    
     while num_obs_available < 30:
         geographical_specificity_index += 1
         if geographical_specificity_index == 4:
             logger.warning(f"No prices available for {row['item_name']} for region {row['region']}, district {row['district']}, or strata {row['reside']}")
             num_obs_available = len(df)
             try:
-                price = np.nanmedian(df["unit_price"])
-                logger.info(f"Using median price from whole country instead, got {price}")
+                price = np.nanmedian(df["price_per_kg"])
+                logger.info(f"Using median price from whole country for {row['item_name']} instead, got {price}")
             except ValueError:
-                logger.error("No prices available, returning nan")
+                logger.error(f"No prices available for {row['item_name']} at country level")
             return price
         num_obs_available = len(df[df[geographical_specificity_dict[geographical_specificity_index]] == row[geographical_specificity_dict[geographical_specificity_index]]])
         logger.debug(f"Number of observations available: {num_obs_available}")
-    price = np.nanmedian(df[df[geographical_specificity_dict[geographical_specificity_index]] == row[geographical_specificity_dict[geographical_specificity_index]]]["unit_price"])
+    price = np.nanmedian(df[df[geographical_specificity_dict[geographical_specificity_index]] == row[geographical_specificity_dict[geographical_specificity_index]]]["price_per_kg"])
     logger.info(f"Price computed normally for {row['item_name']} at {geographical_specificity_dict[geographical_specificity_index]} level, got {price}")
     return price
-
-
 
 def calculate_all_food_prices(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -141,44 +160,47 @@ def calculate_all_food_prices(df: pd.DataFrame) -> pd.DataFrame:
         This function is computationally intensive and may take several minutes to run
         on large datasets. Consider caching results or vectorizing if performance becomes an issue.
     """
+    df["interviewDate"] = pd.to_datetime(df["interviewDate"])
     items_where_not_all_purchased = df[df["All purchased"] == False]
     full_amount_paid = items_where_not_all_purchased["Amount paid"].values
     full_amount_paid = full_amount_paid.astype(float)
     for i in range(len(items_where_not_all_purchased.index)):
         row = items_where_not_all_purchased.iloc[i]
         quantity_not_purchased_but_consumed = row["Quantity consumed in last week"] - row["Quantity purchased"]
-        calcd_price = calc_price(df[(df["item_code"] == row["item_code"]) & (df["unit_code"] == row["unit_code"])], row)
+        df['date_diff'] = df["interviewDate"] - row["interviewDate"]
+        df["date_diff"] = abs(df["date_diff"].dt.days)
+        calcd_price = calc_price(df[(df["item_code"] == row["item_code"]) & 
+                                    (df["unit_code"] == row["unit_code"]) & 
+                                    (df["price_per_kg"].notna()) & 
+                                    (df["date_diff"] < 90)], row)
         full_amount_paid[i] += float(quantity_not_purchased_but_consumed*calcd_price)
     items_where_not_all_purchased["Amount paid"] = full_amount_paid
     df = pd.concat([df[df["All purchased"] == True], items_where_not_all_purchased])
     df = df.sort_index()
     return df
 
-def standardize_units(hh_mod_g1: pd.DataFrame, mrk_mod_d: pd.DataFrame) -> pd.DataFrame:
+def standardize_units(hh_mod_g1: pd.DataFrame) -> pd.DataFrame:
     """
     Standardize the units of consumption for household food items.
 
-    This function takes two DataFrames: one containing household consumption data (hh_mod_g1)
-    and another containing market data on unit weights (mrk_mod_d). It merges these
-    DataFrames and calculates the amount of food consumed in kilograms.
+    This function takes a DataFrame containing household consumption data (hh_mod_g1). 
+    It calculates the amount of food consumed in kilograms.
 
     Args:
         hh_mod_g1 (pd.DataFrame): DataFrame containing household consumption data.
             Expected to have columns: 'item_code', 'unit_code', 'Quantity consumed in last week'.
-        mrk_mod_d (pd.DataFrame): DataFrame containing market data with unit weights.
-            Expected to have columns: 'item_code', 'unit_code', 'unit_weight (kg)'.
 
     Returns:
-        pd.DataFrame: The input hh_mod_g1 DataFrame merged to mrk_mod_d with an additional column
+        pd.DataFrame: The input hh_mod_g1 DataFrame with an additional column
             'Amount consumed in last week (kg)' representing the standardized
             consumption in kilograms.
 
     Note:
         This function assumes that the units to kilograms ratio is homogeneous across the nation and time.
-        It performs a left merge between hh_mod_g1 and mrk_mod_d based on 'item_code' and 'unit_code'.
     """
-    hh_mod_g1 = hh_mod_g1.merge(mrk_mod_d, how="left", on=["item_code", "unit_code"])
     hh_mod_g1["Amount consumed in last week (kg)"] = hh_mod_g1["Quantity consumed in last week"]*hh_mod_g1["unit_weight (kg)"]
+    hh_mod_g1["Amount paid for in last week (kg)"] = hh_mod_g1["Quantity purchased"]*hh_mod_g1["unit_weight (kg)"]
+    hh_mod_g1["price_per_kg"] = hh_mod_g1["Amount paid"]/hh_mod_g1["Amount paid for in last week (kg)"]
     return hh_mod_g1
 
 def strip_non_numeric(value: str) -> str:
@@ -231,12 +253,18 @@ def calc_food_consumption(config: dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
     hh_mod_g1 = clean_hh_mod_g1(hh_mod_g1, config["col_names"]["hh_mod_g1"])
     df = hh_mod_g1.merge(hh_mod_a, how="left", on=["case_id", "HHID"])
     mrk_mod_d = clean_mrk_mod_d(pd.read_stata(data_dir / "mrk_mod_d.dta", convert_categoricals=False), config["col_names"]["mrk_mod_d"])
-    df = standardize_units(df, mrk_mod_d)
+    df = df.merge(mrk_mod_d, how="left", on=["item_code", "unit_code"])
+    # Quantity consumed in last week
+    df = winsorize_by_item(df, "Quantity consumed in last week")
+    # Amount spent
+    df = winsorize_by_item(df, "Amount paid")
+    df = standardize_units(df)
+    # Price per kg
+    df = winsorize_by_item(df, "price_per_kg")
     food_level_df = calculate_all_food_prices(df)
-    hh_level_df = df[["HHID", "case_id", "Amount paid", "Amount consumed in last week (kg)"]].groupby("HHID").sum()
+    hh_level_df = df[["HHID", "case_id", "Amount paid"]].groupby("HHID").sum()
     hh_level_df["Food consumption (annual)"] = hh_level_df["Amount paid"]*52
     return food_level_df, hh_level_df
-
 
 def analyze_food_consumption(food_level_df: pd.DataFrame, hh_level_df: pd.DataFrame) -> None:
     """
@@ -253,30 +281,47 @@ def analyze_food_consumption(food_level_df: pd.DataFrame, hh_level_df: pd.DataFr
     data_dir = Path.cwd().parent / "MWI_2019_IHS-V_v06_M_Stata"
     consumption_agg_df = pd.read_stata(data_dir / "ihs5_consumption_aggregate.dta", convert_categoricals=False)
     hh_level_df = hh_level_df.merge(consumption_agg_df, how="left", on="HHID")
-    correlation = hh_level_df['Food consumption (annual)'].corr(hh_level_df['rexp_cat01'])
-    print(f"The correlation between 'Food consumption (annual)' and 'rexp_cat01' is: {correlation:.4f}")
+    hh_level_df["Food consumption (annual)"] = hh_level_df["Food consumption (annual)"]
+    correlation = hh_level_df['Food consumption (annual)'].corr(hh_level_df['rexp_cat011'])
+    print(f"The correlation between 'Food consumption (annual)' and 'rexp_cat011' is: {correlation:.4f}")
+    
     plt.figure(figsize=(10, 6))
-    sns.scatterplot(x='Food consumption (annual)', y='rexp_cat01', data=hh_level_df, alpha=0.5)
+    
+    # Get the maximum value for both axes to set equal scales
+    max_val = max(
+        hh_level_df['Food consumption (annual)'].max(),
+        hh_level_df['rexp_cat011'].max()
+    )
+    
+    sns.scatterplot(x='Food consumption (annual)', y='rexp_cat011', data=hh_level_df, alpha=0.5)
 
     # Add a line of best fit
     x = hh_level_df['Food consumption (annual)']
-    y = hh_level_df['rexp_cat01']
+    y = hh_level_df['rexp_cat011']
     z = np.polyfit(x, y, 1)
     p = np.poly1d(z)
-    plt.plot(x, p(x), "r--", alpha=0.8)
+    plt.plot(x, p(x), "r--", alpha=0.8, label='Line of best fit')
 
-    plt.title(f"Food consumption (annual) vs rexp_cat01\nCorrelation: {correlation:.4f}")
+    # Add x=y line for perfect correlation
+    plt.plot([0, max_val], [0, max_val], 'k--', alpha=0.5, label='Perfect correlation (x=y)')
+
+    plt.title(f"Food consumption (annual) vs rexp_cat011\nCorrelation: {correlation:.4f}")
     plt.xlabel("Food consumption (annual) (Our estimate)")
-    plt.ylabel("rexp_cat01 (IHS-V)")
+    plt.ylabel("rexp_cat011 (IHS-V)")
+    plt.legend()
+    
+    # Set equal scales for both axes
+    plt.xlim(0, max_val)
+    plt.ylim(0, max_val)
 
     plt.tight_layout()
-    plt.savefig("plots/food_consumption_vs_rexp_cat01.png")
+    plt.savefig("plots/food_consumption_vs_rexp_cat011.png")
 
     print("\nSummary Statistics:")
-    print(hh_level_df[['Food consumption (annual)', 'rexp_cat01']].describe())
+    print(hh_level_df[['Food consumption (annual)', 'rexp_cat011']].describe())
 
-    mean_ratio = hh_level_df['Food consumption (annual)'].mean() / hh_level_df['rexp_cat01'].mean()
-    print(f"\nRatio of means (Food consumption (annual) / rexp_cat01): {mean_ratio:.4f}")
+    mean_ratio = hh_level_df['Food consumption (annual)'].mean() / hh_level_df['rexp_cat011'].mean()
+    print(f"\nRatio of means (Food consumption (annual) / rexp_cat011): {mean_ratio:.4f}")
 
 def write_food_consumption_agg(food_level_df: pd.DataFrame, hh_level_df: pd.DataFrame) -> None:
     food_level_df.to_csv("outputs/food_level_df.csv", index=False)
