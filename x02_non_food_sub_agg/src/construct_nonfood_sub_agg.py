@@ -61,12 +61,38 @@ def analyze_nonfood_consumption(nonfood_df: pd.DataFrame):
     consumption_agg_df = pd.read_stata(data_dir / "ihs5_consumption_aggregate.dta", convert_categoricals=False)
     nonfood_df = nonfood_df.merge(consumption_agg_df, how="left", on="HHID")
     for area in config["consumption_areas"]:
-        try:
-            print(nonfood_df[config["consumption_areas"][area]["code"]].describe())
-            correlation = nonfood_df[f"{area} Consumption (annual)"].corr(nonfood_df[config["consumption_areas"][area]["code"]])
-            print(f"{area} correlation: {correlation}")
-        except KeyError:
-            pass
+        print(nonfood_df[config["consumption_areas"][area]["code"]].describe())
+        print(nonfood_df.columns.tolist())
+        pearson_corr = nonfood_df[f"{area} Consumption (annual)"].corr(nonfood_df[config["consumption_areas"][area]["code"]])
+        print(f"{area} pearson correlation: {pearson_corr}")
+        spearman_corr = nonfood_df[f"{area} Consumption (annual)"].corr(nonfood_df[config["consumption_areas"][area]["code"]], method="spearman")
+        print(f"{area} spearman correlation: {spearman_corr}")
+        plt.figure(figsize=(10, 6))
+            
+        # Get the maximum value for both axes to set equal scales
+        max_val = max(
+            nonfood_df[f"{area} Consumption (annual)"].max(),
+            nonfood_df[config["consumption_areas"][area]["code"]].max()
+        )
+        
+        sns.scatterplot(x=f"{area} Consumption (annual)", y=config["consumption_areas"][area]["code"], data=nonfood_df, alpha=0.5)
+
+        x = nonfood_df[f"{area} Consumption (annual)"]
+        y = nonfood_df[config["consumption_areas"][area]["code"]]
+        z = np.polyfit(x, y, 1)
+        p = np.poly1d(z)
+        plt.plot(x, p(x), "r--", alpha=0.8, label='Line of best fit')
+        plt.plot([0, max_val], [0, max_val], 'k--', alpha=0.5, label='Perfect correlation (x=y)')
+
+        plt.title(f"{area} consumption vs {config['consumption_areas'][area]['code']}\nPearson correlation: {pearson_corr:.4f}\nSpearman correlation: {spearman_corr:.4f}")
+        plt.xlabel(f"{area} consumption (annual)")
+        plt.ylabel(f"{config['consumption_areas'][area]['code']}")
+        plt.legend()
+        plt.xlim(0, max_val)
+        plt.ylim(0, max_val)
+
+        plt.tight_layout()
+        plt.savefig(f"plots/nonfood_consumption_real_vs_{area}.png")
 
 def main(config: Dict[str, Any]) -> None:
     data_dir = Path.cwd().parent / config["data_dir"]
@@ -76,9 +102,9 @@ def main(config: Dict[str, Any]) -> None:
     consumption_agg_df = consumption_agg_df[["HHID", "price_indexL"]]
     nonfood_df = nonfood_df.merge(consumption_agg_df, how="left", on="HHID")
     nonfood_df["Nonfood Consumption Total (annual) (real)"] = nonfood_df["Nonfood Consumption Total (annual) (nominal)"]/nonfood_df["price_indexL"]
+    analyze_nonfood_consumption(nonfood_df)
     nonfood_df = nonfood_df[["HHID", "Nonfood Consumption Total (annual) (nominal)", "Nonfood Consumption Total (annual) (real)"]]
     nonfood_df.to_csv("outputs/nonfood_df.csv")
-    analyze_nonfood_consumption(nonfood_df)
 
 if __name__ == "__main__":
     """
