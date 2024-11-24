@@ -4,6 +4,8 @@ import yaml
 import numpy as np
 import statsmodels.api as sm
 import pickle
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # TODO: Add logging
 # TODO: Add unit tests
@@ -39,23 +41,83 @@ def main(config: dict):
     df['survey_month'] = df['interviewDate'].dt.month
     renter_df = df[df["property_use_type"] == "RENTED"]
     renter_df["rent_per_month"] = get_rent_per_month(renter_df, True)
-    model, renter_df["predicted_rent"] = make_rent_predictor(renter_df, "amount_paid_to_rent_property", config)
+    # It's not clear to me that I should winsorize this column, as it's possible that
+    # the highest values are correct, but they seem unlikely.
+    # renter_df = winsorize_column(renter_df, "rent_per_month", limits=(0.025, 0.025))
+    sns.displot(renter_df, x="rent_per_month")
+    plt.savefig(Path("plots") / "rent_per_month_for_renters_distribution.png")
+    plt.close()
+
+    model, renter_df["predicted_rent"] = make_rent_predictor(renter_df, "rent_per_month", config)
     non_renter_df = df[df["property_use_type"] != "RENTED"]
     non_renter_df["rent_per_month"] = get_rent_per_month(non_renter_df, False)
+    non_renter_df = non_renter_df.sort_values(by="rent_per_month", ascending=False)
+    non_renter_df.to_csv(Path("output") / "non_renter_df.csv")
     non_renter_df["predicted_rent"] = predict_rent(non_renter_df, model, config)
     df = pd.concat([renter_df, non_renter_df])
     df['residuals'] = df['rent_per_month'] - df['predicted_rent']
     df['outliers'] = np.abs(df['residuals']) > 2 * df['residuals'].std()
+    df[df["outliers"]].to_csv(Path("output") / "rent_outliers.csv")
     df["rent_coalesced"] = [pred_rent if outlier else rent for pred_rent, rent, outlier in zip(df["predicted_rent"], df["rent_per_month"], df["outliers"])]
     consumption_agg_df = pd.read_stata(data_dir / "ihs5_consumption_aggregate.dta", convert_categoricals=False)
     consumption_agg_df = consumption_agg_df[["HHID", "price_indexL"]]
     df = df.merge(consumption_agg_df, how="left", on="HHID")
     df["Housing Consumption (annual) (nominal)"] = df["rent_coalesced"]*12
     df["Housing Consumption (annual) (real)"] = df["Housing Consumption (annual) (nominal)"]/df["price_indexL"]
+    create_rent_analysis_plot(df)
+
     df = df[["HHID", "case_id", "Housing Consumption (annual) (nominal)", "Housing Consumption (annual) (real)"]]
     df.to_csv('output/housing_sub_agg.csv')
     with open('output/rent_predictor_model.pkl', 'wb') as file:
         pickle.dump(model, file)
+
+def create_rent_analysis_plot(df: pd.DataFrame, output_path: str = 'plots/rent_analysis.png') -> None:
+    """
+    Creates a scatter plot comparing predicted vs reported rent values.
+    Only includes households that reported rent (renters).
+    
+    Args:
+        df: DataFrame containing rent data
+        output_path: Path to save the plot
+    """
+    # Filter for only renters (those who reported rent)
+    renters_df = df[df["property_use_type"] == "RENTED"].copy()
+    
+    plt.figure(figsize=(10, 6))
+    
+    # Calculate correlations
+    pearson_corr = renters_df["predicted_rent"].corr(renters_df["rent_per_month"], method='pearson')
+    spearman_corr = renters_df["predicted_rent"].corr(renters_df["rent_per_month"], method='spearman')
+    
+    # Create scatter plot
+    sns.scatterplot(data=renters_df, 
+                   x="predicted_rent",
+                   y="rent_per_month",
+                   alpha=0.5)
+    
+    # Add diagonal line for perfect prediction
+    max_val = max(renters_df["predicted_rent"].max(), renters_df["rent_per_month"].max())
+    plt.plot([0, max_val], [0, max_val], 'k--', alpha=0.5, label='Perfect prediction (x=y)')
+    
+    # Add title and labels
+    plt.title(f"Predicted vs Reported Monthly Rent\nPearson correlation: {pearson_corr:.4f}\nSpearman correlation: {spearman_corr:.4f}")
+    plt.xlabel("Predicted monthly rent")
+    plt.ylabel("Reported monthly rent")
+    
+    plt.legend()
+    plt.axis('equal')
+    plt.tight_layout()
+    
+    # Create directory if it doesn't exist
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    plt.savefig(output_path)
+    plt.close()
+
+
+#     sns.histplot(df, x="rent_coalesced")
+#     plt.savefig(Path("plots") / "rent_coalesced_distribution.png")
+#     plt.close()
 
 def get_rent_per_month(df: pd.DataFrame, renter: bool):
     """
@@ -106,10 +168,13 @@ def prep_df_for_rent_prediction(df: pd.DataFrame, independent_vars: list[str]):
             - y (pd.Series): Target variable (log of rent amount)
     """
     X = df[independent_vars]
-    y = df["log_rent"]
     non_numeric_cols = [col for col in independent_vars if not pd.api.types.is_numeric_dtype(X[col])]
     X = pd.get_dummies(X, columns=non_numeric_cols, drop_first=True, dtype=float)
-    return X, y
+    try: 
+        y = df["log_rent"]
+        return X, y
+    except KeyError:
+        return X
 
 def make_rent_predictor(df, target_col, config):
     """
@@ -188,7 +253,6 @@ def predict_rent(df, model, config):
     Returns:
         np.array: Array of predicted rental values in original scale (not log-transformed)
     """
-    df['log_rent'] = np.log(df["rent_per_month"])
     independent_vars = [
         config['cols']['hh_f08'],  # type_of_roof
         config['cols']['hh_f07'],  # outer_walls_material
@@ -204,12 +268,43 @@ def predict_rent(df, model, config):
         "survey_year",
         "survey_month"
     ]
-    X, y = prep_df_for_rent_prediction(df, independent_vars)
+    X = prep_df_for_rent_prediction(df, independent_vars)
     X = sm.add_constant(X)
 
     predicted_log_rent = model.predict(X)
     predicted_rent = np.exp(predicted_log_rent)
+    # sns.displot(predicted_rent)
+    # plt.savefig(Path("plots") / "predicted_rent_distribution.png")
+    # plt.close()
+    X['predicted_rent'] = predicted_rent
+    X = X.sort_values(by="predicted_rent", ascending=False)
+    X.to_csv(Path("output") / "predicted_rent_df.csv")
+    predicted_rent = winsorize_column(pd.DataFrame({"predicted_rent": predicted_rent}), "predicted_rent", limits=(0.01, 0.01))["predicted_rent"]
+    X['predicted_rent'] = predicted_rent
+    X.to_csv(Path("output") / "predicted_rent_df_winsorized.csv")
+    print(predicted_rent.describe())
     return predicted_rent
+
+def winsorize_column(df: pd.DataFrame, col: str, limits=(0.05, 0.05)) -> pd.DataFrame:
+    """
+    Winsorize a column by group, preserving the distribution within each item_code.
+    
+    Args:
+        df (pd.DataFrame): DataFrame containing the data
+        col (str): Name of column to winsorize
+        limits (tuple): Lower and upper percentile limits for winsorization
+        
+    Returns:
+        pd.DataFrame: DataFrame with winsorized values
+    """
+    print(df[col].describe())
+    values = df[col]
+    if len(values) > 0: 
+        lower = np.percentile(values, limits[0] * 100)
+        upper = np.percentile(values, (1 - limits[1]) * 100)
+        df[col] = np.clip(values, lower, upper)
+    print(df[col].describe())
+    return df
 
 if __name__ == "__main__":
     """
